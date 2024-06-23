@@ -1,26 +1,36 @@
 package wiretap
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net"
+	"sync"
 )
+
+var bufPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
+}
 
 type conn struct {
 	net.Conn
 	out        io.Writer
-	outReadCh  chan []byte
-	outWriteCh chan []byte
+	outReadCh  chan *bytes.Buffer
+	outWriteCh chan *bytes.Buffer
 	doneCh     chan struct{}
+	pool       *sync.Pool
 }
 
 func newConn(inconn net.Conn, out io.Writer) *conn {
 	c := &conn{
 		Conn:       inconn,
 		out:        out,
-		outReadCh:  make(chan []byte),
-		outWriteCh: make(chan []byte),
+		outReadCh:  make(chan *bytes.Buffer),
+		outWriteCh: make(chan *bytes.Buffer),
 		doneCh:     make(chan struct{}, 2), // allow for both sides to close (testing)
+		pool:       &bufPool,
 	}
 	c.startOut()
 
@@ -28,17 +38,25 @@ func newConn(inconn net.Conn, out io.Writer) *conn {
 }
 
 func (c *conn) startOut() {
-	rIdent := []byte(fmt.Sprintf("%s read\n", c.RemoteAddr()))
-	wIdent := []byte(fmt.Sprintf("%s write\n", c.RemoteAddr()))
+	rIdent := fmt.Sprintf("%s %s read\n", c.LocalAddr(), c.RemoteAddr())
+	wIdent := fmt.Sprintf("%s %s write\n", c.LocalAddr(), c.RemoteAddr())
+	outBuf := bytes.Buffer{}
+
+	writeOut := func(rcvBuf *bytes.Buffer, ident *string) {
+		outBuf.Reset()
+		outBuf.WriteString(*ident)
+		outBuf.Write(rcvBuf.Bytes())
+		c.out.Write(outBuf.Bytes()) // TODO: log on error?
+		c.pool.Put(rcvBuf)
+	}
+
 	go func() {
 		for {
 			select {
 			case b := <-c.outReadCh:
-				c.out.Write(rIdent)
-				c.out.Write(b)
+				writeOut(b, &rIdent)
 			case b := <-c.outWriteCh:
-				c.out.Write(wIdent)
-				c.out.Write(b)
+				writeOut(b, &wIdent)
 			case <-c.doneCh:
 				return
 			}
@@ -46,27 +64,27 @@ func (c *conn) startOut() {
 	}()
 }
 
-func (c *conn) Read(b []byte) (n int, err error) {
-	n, err = c.Conn.Read(b)
-	if err != nil {
-		return 0, err
-	}
+func (c *conn) sendToWriter(b []byte, ch chan *bytes.Buffer) {
+	buf := c.pool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.Write(b)
+	ch <- buf
+}
 
-	cb := make([]byte, len(b))
-	copy(cb, b)
-	c.outReadCh <- cb
+func (c *conn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if err == nil {
+		c.sendToWriter(b[:n], c.outReadCh)
+	}
 	return n, err
 }
 
-func (c *conn) Write(b []byte) (n int, err error) {
-	n, err = c.Conn.Write(b)
-	if err != nil {
-		return 0, err
+func (c *conn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if err == nil {
+		c.sendToWriter(b[:n], c.outWriteCh)
 	}
 
-	cb := make([]byte, len(b))
-	copy(cb, b)
-	c.outWriteCh <- cb
 	return n, err
 }
 
