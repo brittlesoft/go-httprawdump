@@ -38,14 +38,20 @@ func newConn(inconn net.Conn, out io.Writer) *conn {
 }
 
 func (c *conn) startOut() {
-	rIdent := fmt.Sprintf("%s %s read\n", c.LocalAddr(), c.RemoteAddr())
-	wIdent := fmt.Sprintf("%s %s write\n", c.LocalAddr(), c.RemoteAddr())
+	rIdent := fmt.Sprintf("%s %s read", c.LocalAddr(), c.RemoteAddr())
+	wIdent := fmt.Sprintf("%s %s write", c.LocalAddr(), c.RemoteAddr())
 	outBuf := bytes.Buffer{}
 
 	writeOut := func(rcvBuf *bytes.Buffer, ident *string) {
 		outBuf.Reset()
 		outBuf.WriteString(*ident)
+		outBuf.WriteString(" begin\n")
+
 		outBuf.Write(rcvBuf.Bytes())
+
+		outBuf.WriteString("\n")
+		outBuf.WriteString(*ident)
+		outBuf.WriteString(" end\n")
 		c.out.Write(outBuf.Bytes()) // TODO: log on error?
 		c.pool.Put(rcvBuf)
 	}
